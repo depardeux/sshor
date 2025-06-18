@@ -2,10 +2,19 @@ package ssh
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"os/user"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/hurlebouc/sshor/config"
 	"golang.org/x/crypto/ssh"
@@ -32,17 +41,133 @@ func readPassword(prompt string) string {
 	return string(bytePassword)
 }
 
+type keepassPwdCache struct {
+	PasswordEnc string    `json:"password_enc"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// Chemin du fichier temporaire pour le cache du mot de passe
+func getKeepassPwdCachePath(path string) string {
+	tmpDir := os.TempDir()
+	hash := sha256.Sum256([]byte(path + os.Getenv("USER")))
+	return filepath.Join(tmpDir, "sshor_keepass_"+base64.RawURLEncoding.EncodeToString(hash[:8])+".cache")
+}
+
+// Génère une clé de chiffrement à partir d'une info locale et d'un salt externe stocké dans un fichier
+func getKeepassPwdKey() []byte {
+	uid := os.Getenv("USER")
+	if uid == "" {
+		uid = os.Getenv("USERNAME")
+	}
+	// Lecture du salt depuis un fichier dédié
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Erreur lors de la récupération du dossier de configuration utilisateur : %v\n", err)
+		panic(err)
+	}
+	saltPath := filepath.Join(configDir, "sshor_keepass_salt.txt")
+	data, err := ioutil.ReadFile(saltPath)
+	if err != nil || len(data) != 44 { // base64 de 32 octets = 44 caractères
+		fmt.Fprintf(os.Stderr, "Erreur : le fichier salt est manquant ou invalide (%s).\nVeuillez créer un fichier de 32 octets aléatoires encodés en base64 à cet emplacement : %s\n", err, saltPath)
+		panic("Salt file missing or invalid")
+	}
+	salt := string(data)
+	key := sha256.Sum256([]byte(uid + salt))
+	return key[:]
+}
+
+// Chiffre le mot de passe
+func encryptKeepassPwd(plain string) (string, error) {
+	key := getKeepassPwdKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	plaintext := []byte(plain)
+	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
+	iv := ciphertext[:aes.BlockSize]
+	copy(iv, key[:aes.BlockSize])
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], plaintext)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// Déchiffre le mot de passe
+func decryptKeepassPwd(enc string) (string, error) {
+	key := getKeepassPwdKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", err
+	}
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+	stream := cipher.NewCFBDecrypter(block, iv)
+	stream.XORKeyStream(ciphertext, ciphertext)
+	return string(ciphertext), nil
+}
+
+// Stocke le mot de passe chiffré dans un fichier temporaire pour 60 minutes
+func cacheKeepassPwd(path, pwd string) error {
+	enc, err := encryptKeepassPwd(pwd)
+	if err != nil {
+		return err
+	}
+	cache := keepassPwdCache{
+		PasswordEnc: enc,
+		ExpiresAt:   time.Now().Add(60 * time.Minute),
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(getKeepassPwdCachePath(path), data, 0600)
+}
+
+// Récupère le mot de passe depuis le cache si valide, sinon retourne ""
+func getCachedKeepassPwd(path string) (string, bool) {
+	cachePath := getKeepassPwdCachePath(path)
+	data, err := ioutil.ReadFile(cachePath)
+	if err != nil {
+		return "", false
+	}
+	var cache keepassPwdCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		os.Remove(cachePath)
+		return "", false
+	}
+	if time.Now().After(cache.ExpiresAt) {
+		os.Remove(cachePath)
+		return "", false
+	}
+	pwd, err := decryptKeepassPwd(cache.PasswordEnc)
+	if err != nil {
+		os.Remove(cachePath)
+		return "", false
+	}
+	return pwd, true
+}
+
 func getPassword(user string, config config.Host, keepassPwdMap map[string]string) string {
 
 	keepass := config.GetKeepass()
 	if keepass != nil {
 		path := keepass.Path
 		id := keepass.Id
+		// --- Ajout gestion cache local chiffré ---
+		if pwd, ok := getCachedKeepassPwd(path); ok {
+			return ReadKeepass(path, pwd, id, user)
+		}
 		pwd, present := keepassPwdMap[path]
 		if !present {
 			pwd = readPassword(fmt.Sprintf("Password for %s: ", path))
 			keepassPwdMap[path] = pwd
 		}
+		// Stocke dans le cache local chiffré pour 60 minutes
+		_ = cacheKeepassPwd(path, pwd)
 		return ReadKeepass(path, pwd, id, user)
 	}
 	host, port := getHostPort(config)
