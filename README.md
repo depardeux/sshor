@@ -7,6 +7,16 @@ Multi-plateform SSH tools
 - Open tunnels from local or remote host
 - Open socks or http proxy through remote host
 
+# Version 
+
+Version 1.0.5
+
+Beta testing for version 1.0.5 with adding of keepass password encryption so you no longer have to enter it for a given time (60 minutes by default) 
+
+The file with sha256 is stored in "%USERPROFILE%\AppData\Local\Temp\sshor_keepass_*.cache"
+
+The salt is stored in "%APPDATA%\sshor_keepass_salt.txt"
+
 # Install
 
 ## From binary
