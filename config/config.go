@@ -14,7 +14,8 @@ type Host struct {
 }
 
 type Config struct {
-	Hosts map[string]Host `json:"hosts"`
+	Hosts                            map[string]Host `json:"hosts"`
+	KeepassPwdCacheExpirationMinutes int             `json:"keepassPwdCacheExpirationMinutes"`
 }
 
 func (c *Config) GetHost(host string) *Host {

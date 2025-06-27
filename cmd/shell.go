@@ -4,6 +4,11 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"encoding/base64"
+	"fmt"
+	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hurlebouc/sshor/config"
@@ -30,8 +35,63 @@ var shellCmd = &cobra.Command{
 	},
 }
 
+var manageCmd = &cobra.Command{
+	Use:   "manage",
+	Short: "Manage the salt and Keepass cache files",
+}
+
+var manageSaltCmd = &cobra.Command{
+	Use:   "salt",
+	Short: "Generate a salt (Base64, 32 bytes) and save it in %APPDATA%.",
+	Run: func(cmd *cobra.Command, args []string) {
+		bytes := make([]byte, 32)
+		_, err := rand.Read(bytes)
+		if err != nil {
+			panic("Erreur lors de la génération du salt : " + err.Error())
+		}
+		base64Salt := base64.StdEncoding.EncodeToString(bytes)
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			panic("Erreur lors de la récupération du dossier de configuration utilisateur : " + err.Error())
+		}
+		filePath := filepath.Join(configDir, "sshor_keepass_salt.txt")
+		err = os.WriteFile(filePath, []byte(base64Salt), 0600)
+		if err != nil {
+			panic("Erreur lors de l'écriture du salt : " + err.Error())
+		}
+		fmt.Printf("Chaîne Base64 enregistrée dans : %s\n", filePath)
+	},
+}
+
+var manageCleanCmd = &cobra.Command{
+	Use:   "clean",
+	Short: "Delete the sshor_keepass_* files in the Temp folder.",
+	Run: func(cmd *cobra.Command, args []string) {
+		tempDir := os.TempDir()
+		files, err := filepath.Glob(filepath.Join(tempDir, "sshor_keepass_*"))
+		if err != nil {
+			panic("Erreur lors de la recherche des fichiers : " + err.Error())
+		}
+		if len(files) == 0 {
+			fmt.Printf("Aucun fichier correspondant trouvé dans %s\n", tempDir)
+			return
+		}
+		for _, file := range files {
+			err := os.Remove(file)
+			if err != nil {
+				fmt.Printf("Erreur lors de la suppression de %s : %v\n", file, err)
+			} else {
+				fmt.Printf("Fichier supprimé : %s\n", filepath.Base(file))
+			}
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(shellCmd)
+	rootCmd.AddCommand(manageCmd)
+	manageCmd.AddCommand(manageSaltCmd)
+	manageCmd.AddCommand(manageCleanCmd)
 
 	// Here you will define your flags and configuration settings.
 

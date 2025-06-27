@@ -2,10 +2,19 @@ package ssh
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"os/user"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/hurlebouc/sshor/config"
 	"golang.org/x/crypto/ssh"
@@ -22,6 +31,11 @@ func GetCurrentUser(ctx context.Context) string {
 	return ctx.Value(CURRENT_USER).(string)
 }
 
+func init() {
+    // Supprime les informations de date, heure, fichier, etc.
+    log.SetFlags(0)
+}
+
 func readPassword(prompt string) string {
 	print(prompt)
 	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
@@ -32,20 +46,140 @@ func readPassword(prompt string) string {
 	return string(bytePassword)
 }
 
-func getPassword(user string, config config.Host, keepassPwdMap map[string]string) string {
+type keepassPwdCache struct {
+	PasswordEnc string    `json:"password_enc"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
 
-	keepass := config.GetKeepass()
+// Chemin du fichier temporaire pour le cache du mot de passe
+func getKeepassPwdCachePath(path string) string {
+	tmpDir := os.TempDir()
+	hash := sha256.Sum256([]byte(path + os.Getenv("USER")))
+	return filepath.Join(tmpDir, "sshor_keepass_"+base64.RawURLEncoding.EncodeToString(hash[:8])+".cache")
+}
+
+// Génère une clé de chiffrement à partir d'une info locale et d'un salt externe stocké dans un fichier
+func getKeepassPwdKey() []byte {
+	uid := os.Getenv("USER")
+	if uid == "" {
+		uid = os.Getenv("USERNAME")
+	}
+	// Lecture du salt depuis un fichier dédié
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Erreur lors de la récupération du dossier de configuration utilisateur : %v\n", err)
+		panic(err)
+	}
+	saltPath := filepath.Join(configDir, "sshor_keepass_salt.txt")
+	data, err := ioutil.ReadFile(saltPath)
+	if err != nil || len(data) != 44 { // base64 de 32 octets = 44 caractères
+		fmt.Fprintf(os.Stderr, "Erreur : le fichier salt est manquant ou invalide (%s).\nVeuillez créer un fichier de 32 octets aléatoires encodés en base64 à cet emplacement : %s\n", err, saltPath)
+		panic("Salt file missing or invalid")
+	}
+	salt := string(data)
+	key := sha256.Sum256([]byte(uid + salt))
+	return key[:]
+}
+
+// Chiffre le mot de passe
+func encryptKeepassPwd(plain string) (string, error) {
+	key := getKeepassPwdKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	plaintext := []byte(plain)
+	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
+	iv := ciphertext[:aes.BlockSize]
+	copy(iv, key[:aes.BlockSize])
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], plaintext)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// Déchiffre le mot de passe
+func decryptKeepassPwd(enc string) (string, error) {
+	key := getKeepassPwdKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", err
+	}
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+	stream := cipher.NewCFBDecrypter(block, iv)
+	stream.XORKeyStream(ciphertext, ciphertext)
+	return string(ciphertext), nil
+}
+
+// Stocke le mot de passe chiffré dans un fichier temporaire pour expirationMinutes minutes
+func cacheKeepassPwd(path, pwd string, expirationMinutes int) error {
+	enc, err := encryptKeepassPwd(pwd)
+	if err != nil {
+		return err
+	}
+	cache := keepassPwdCache{
+		PasswordEnc: enc,
+		ExpiresAt:   time.Now().Add(time.Duration(expirationMinutes) * time.Minute),
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(getKeepassPwdCachePath(path), data, 0600)
+}
+
+// Récupère le mot de passe depuis le cache si valide, sinon retourne ""
+func getCachedKeepassPwd(path string) (string, bool) {
+	cachePath := getKeepassPwdCachePath(path)
+	data, err := ioutil.ReadFile(cachePath)
+	if err != nil {
+		return "", false
+	}
+	var cache keepassPwdCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		os.Remove(cachePath)
+		return "", false
+	}
+	if time.Now().After(cache.ExpiresAt) {
+		os.Remove(cachePath)
+		return "", false
+	}
+	pwd, err := decryptKeepassPwd(cache.PasswordEnc)
+	if err != nil {
+		os.Remove(cachePath)
+		return "", false
+	}
+	return pwd, true
+}
+
+func getPassword(user string, hostConf config.Host, keepassPwdMap map[string]string, globalConf *config.Config) string {
+	keepass := hostConf.GetKeepass()
 	if keepass != nil {
 		path := keepass.Path
 		id := keepass.Id
+		if pwd, ok := getCachedKeepassPwd(path); ok {
+			return ReadKeepass(path, pwd, id, user)
+		}
 		pwd, present := keepassPwdMap[path]
 		if !present {
 			pwd = readPassword(fmt.Sprintf("Password for %s: ", path))
 			keepassPwdMap[path] = pwd
 		}
+		expirationMinutes := 60
+		if globalConf != nil && globalConf.KeepassPwdCacheExpirationMinutes > 0 {
+			expirationMinutes = globalConf.KeepassPwdCacheExpirationMinutes
+			log.Printf("\n[Custom] Paramètre temps personnalisé à : %d minutes\n", expirationMinutes)
+		} else {
+			log.Printf("\n[Default] Paramètre par défaut temps 60 minutes\n")
+		}
+		_ = cacheKeepassPwd(path, pwd, expirationMinutes)
 		return ReadKeepass(path, pwd, id, user)
 	}
-	host, port := getHostPort(config)
+	host, port := getHostPort(hostConf)
 	if host == nil {
 		return readPassword(fmt.Sprintf("Password for %s ", user))
 	} else {
@@ -53,8 +187,8 @@ func getPassword(user string, config config.Host, keepassPwdMap map[string]strin
 	}
 }
 
-func getAuthMethod(user string, config config.Host, keepassPwdMap map[string]string) ssh.AuthMethod {
-	pwd := getPassword(user, config, keepassPwdMap)
+func getAuthMethod(user string, config config.Host, keepassPwdMap map[string]string, globalConf *config.Config) ssh.AuthMethod {
+	pwd := getPassword(user, config, keepassPwdMap, globalConf)
 	return ssh.Password(pwd)
 }
 
@@ -85,13 +219,13 @@ func getUser(ctx context.Context, hostConfig config.Host) (string, context.Conte
 	return GetCurrentUser(ctx), ctx
 }
 
-func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string) (*ssh.ClientConfig, context.Context) {
+func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string, globalConf *config.Config) (*ssh.ClientConfig, context.Context) {
 	user, newctx := getUser(ctx, hostConfig)
 	var authMethod ssh.AuthMethod
 	if passwordFlag != "" {
 		authMethod = ssh.Password(passwordFlag)
 	} else {
-		authMethod = getAuthMethod(user, hostConfig, keepassPwdMap)
+		authMethod = getAuthMethod(user, hostConfig, keepassPwdMap, globalConf)
 	}
 
 	clientConfig := &ssh.ClientConfig{
@@ -104,17 +238,17 @@ func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFla
 	return clientConfig, newctx
 }
 
-func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string) (SshClient, context.Context) {
+func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string, globalConf *config.Config) (SshClient, context.Context) {
 	var jumpClient *SshClient = nil
 	if hostConfig.GetJump() != nil {
 		jumpHost := *hostConfig.GetJump()
-		jumpClients, nctx := NewSshClient(ctx, jumpHost, "", keepassPwdMap)
+		jumpClients, nctx := NewSshClient(ctx, jumpHost, "", keepassPwdMap, globalConf)
 		jumpClient = &jumpClients
 		ctx = nctx
 	}
 	if hostConfig.GetHost() == nil {
 		login, ctx := getUser(ctx, hostConfig)
-		password := getPassword(login, hostConfig, keepassPwdMap)
+		password := getPassword(login, hostConfig, keepassPwdMap, globalConf)
 		return SshClient{
 			Client: nil,
 			Jump:   jumpClient,
@@ -138,7 +272,7 @@ func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag stri
 		if err != nil {
 			panic(err)
 		}
-		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap)
+		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap, globalConf)
 		ncc, chans, reqs, err := ssh.NewClientConn(conn, *hostConfig.GetHost(), clientConfig)
 		if err != nil {
 			panic(err)
@@ -150,7 +284,7 @@ func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag stri
 			Jump:       jumpClient,
 		}, ctx
 	} else {
-		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap)
+		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap, globalConf)
 		// Connect to ssh server
 		conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", *hostConfig.GetHost(), hostConfig.GetPortOrDefault(22)), clientConfig)
 		if err != nil {
@@ -208,7 +342,11 @@ type Options struct {
 func getSshClient(hostConf config.Host, passwordFlag, keepassPwdFlag string) *ssh.Client {
 	keepassPwdMap := InitKeepassPwdMap(hostConf, keepassPwdFlag)
 	ctx := InitContext()
-	sshClient, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap)
+	globalConf, err := config.ReadConf()
+	if err != nil {
+		log.Panicln("Erreur lors de la lecture de la configuration :", err)
+	}
+	sshClient, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap, globalConf)
 	if sshClient.Client == nil {
 		log.Panicln("Cannot change user of proxied connection")
 	}

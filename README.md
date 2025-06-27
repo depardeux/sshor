@@ -7,6 +7,61 @@ Multi-plateform SSH tools
 - Open tunnels from local or remote host
 - Open socks or http proxy through remote host
 
+# 🚀 Version 1.0.5 (Beta)
+
+This beta release introduces **KeePass password caching**, allowing you to avoid re-entering your password for a configurable period (default: **60 minutes**).
+
+---
+
+## 🔧 Configuration
+
+To customize the cache duration for the KeePass password, add the following optional parameter to your `config.cue` file:
+
+```cuelang
+package sshor
+```
+keepassPwdCacheExpirationMinutes: 360
+
+hosts: {
+...
+}
+
+### 📁 Cache and Salt File Storage
+
+During the authentication caching process, two files are created to securely store sensitive data:
+
+- **🗂️ KeePass Password Cache File**  
+  Contains the SHA-256 hash of the KeePass password.  
+  **Location:**  
+  `%USERPROFILE%\AppData\Local\Temp\sshor_keepass_*.cache`
+
+- **🧂 Salt File**  
+  Used to strengthen password hashing security.  
+  **Location:**  
+  `%APPDATA%\sshor_keepass_salt.txt`
+
+These files are automatically managed by the application and are used to validate the cached password during the defined expiration period.
+
+---
+
+### 🛠️ Salt and Cache Management
+
+Salt and cache file management is now handled directly via the `sshor manage` command-line interface, replacing the previous PowerShell script.
+
+- **Generate a new salt**
+  ```bash
+  sshor manage salt
+  ```
+
+This command creates a new salt file, used to enhance password hashing.
+
+- **Delete the cached KeePass password file**
+  ```bash
+  sshor manage clean
+  ```
+
+This command removes the cached password file from the system.
+
 # Install
 
 ## From binary
@@ -15,7 +70,7 @@ Download appropriate version from [Github release](https://github.com/hurlebouc/
 
 ## From sources
 
-If go 1.22 is installed on your machine, you can do
+If go 1.23 is installed on your machine, you can do
 
 ```sh
 go build .
