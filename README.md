@@ -25,7 +25,7 @@ keepassPwdCacheExpirationMinutes: 360
 hosts: {
     ...
 }
-
+```
 📁 Cache and Salt File Storage
 During the caching process, two files are created to securely store authentication data:
 
