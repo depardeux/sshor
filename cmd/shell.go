@@ -37,12 +37,12 @@ var shellCmd = &cobra.Command{
 
 var manageCmd = &cobra.Command{
 	Use:   "manage",
-	Short: "Gérer le salt et les fichiers cache Keepass",
+	Short: "Manage the salt and Keepass cache files",
 }
 
 var manageSaltCmd = &cobra.Command{
 	Use:   "salt",
-	Short: "Générer un salt (Base64, 32 octets) et l'enregistrer dans %APPDATA%",
+	Short: "Generate a salt (Base64, 32 bytes) and save it in %APPDATA%.",
 	Run: func(cmd *cobra.Command, args []string) {
 		bytes := make([]byte, 32)
 		_, err := rand.Read(bytes)
@@ -65,7 +65,7 @@ var manageSaltCmd = &cobra.Command{
 
 var manageCleanCmd = &cobra.Command{
 	Use:   "clean",
-	Short: "Supprimer les fichiers sshor_keepass_* dans le dossier Temp",
+	Short: "Delete the sshor_keepass_* files in the Temp folder.",
 	Run: func(cmd *cobra.Command, args []string) {
 		tempDir := os.TempDir()
 		files, err := filepath.Glob(filepath.Join(tempDir, "sshor_keepass_*"))
