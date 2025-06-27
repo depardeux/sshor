@@ -3,6 +3,7 @@ package copy
 import (
 	"fmt"
 	"io/fs"
+	"log"
 
 	"github.com/hurlebouc/sshor/config"
 	"github.com/hurlebouc/sshor/ssh"
@@ -75,7 +76,11 @@ func NewRemote(hostConfig config.Host, passwordFlag, keepassPwdFlag string, path
 	keepassPwdMap := ssh.InitKeepassPwdMap(hostConfig, keepassPwdFlag)
 
 	ctx := ssh.InitContext()
-	sshClient, _ := ssh.NewSshClient(ctx, hostConfig, passwordFlag, keepassPwdMap)
+	globalConf, err := config.ReadConf()
+	if err != nil {
+		log.Panicln("Erreur lors de la lecture de la configuration :", err)
+	}
+	sshClient, _ := ssh.NewSshClient(ctx, hostConfig, passwordFlag, keepassPwdMap, globalConf)
 	if sshClient.Client == nil {
 		panic("Cannot construct ssh client. This is probably caused by not specifying host of the target.")
 	}

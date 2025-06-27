@@ -2,19 +2,10 @@ package ssh
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
 	"os/user"
-	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/hurlebouc/sshor/config"
 	"golang.org/x/crypto/ssh"
@@ -29,6 +20,11 @@ var CURRENT_USER = Key{
 
 func GetCurrentUser(ctx context.Context) string {
 	return ctx.Value(CURRENT_USER).(string)
+}
+
+func init() {
+    // Supprime les informations de date, heure, fichier, etc.
+    log.SetFlags(0)
 }
 
 func readPassword(prompt string) string {
@@ -110,15 +106,15 @@ func decryptKeepassPwd(enc string) (string, error) {
 	return string(ciphertext), nil
 }
 
-// Stocke le mot de passe chiffré dans un fichier temporaire pour 60 minutes
-func cacheKeepassPwd(path, pwd string) error {
+// Stocke le mot de passe chiffré dans un fichier temporaire pour expirationMinutes minutes
+func cacheKeepassPwd(path, pwd string, expirationMinutes int) error {
 	enc, err := encryptKeepassPwd(pwd)
 	if err != nil {
 		return err
 	}
 	cache := keepassPwdCache{
 		PasswordEnc: enc,
-		ExpiresAt:   time.Now().Add(60 * time.Minute),
+		ExpiresAt:   time.Now().Add(time.Duration(expirationMinutes) * time.Minute),
 	}
 	data, err := json.Marshal(cache)
 	if err != nil {
@@ -151,13 +147,11 @@ func getCachedKeepassPwd(path string) (string, bool) {
 	return pwd, true
 }
 
-func getPassword(user string, config config.Host, keepassPwdMap map[string]string) string {
-
-	keepass := config.GetKeepass()
+func getPassword(user string, hostConf config.Host, keepassPwdMap map[string]string, globalConf *config.Config) string {
+	keepass := hostConf.GetKeepass()
 	if keepass != nil {
 		path := keepass.Path
 		id := keepass.Id
-		// --- Ajout gestion cache local chiffré ---
 		if pwd, ok := getCachedKeepassPwd(path); ok {
 			return ReadKeepass(path, pwd, id, user)
 		}
@@ -166,11 +160,17 @@ func getPassword(user string, config config.Host, keepassPwdMap map[string]strin
 			pwd = readPassword(fmt.Sprintf("Password for %s: ", path))
 			keepassPwdMap[path] = pwd
 		}
-		// Stocke dans le cache local chiffré pour 60 minutes
-		_ = cacheKeepassPwd(path, pwd)
+		expirationMinutes := 60
+		if globalConf != nil && globalConf.KeepassPwdCacheExpirationMinutes > 0 {
+			expirationMinutes = globalConf.KeepassPwdCacheExpirationMinutes
+			log.Printf("\n[Custom] Paramètre temps personnalisé à : %d minutes\n", expirationMinutes)
+		} else {
+			log.Printf("\n[Default] Paramètre par défaut temps 60 minutes\n")
+		}
+		_ = cacheKeepassPwd(path, pwd, expirationMinutes)
 		return ReadKeepass(path, pwd, id, user)
 	}
-	host, port := getHostPort(config)
+	host, port := getHostPort(hostConf)
 	if host == nil {
 		return readPassword(fmt.Sprintf("Password for %s ", user))
 	} else {
@@ -178,8 +178,8 @@ func getPassword(user string, config config.Host, keepassPwdMap map[string]strin
 	}
 }
 
-func getAuthMethod(user string, config config.Host, keepassPwdMap map[string]string) ssh.AuthMethod {
-	pwd := getPassword(user, config, keepassPwdMap)
+func getAuthMethod(user string, config config.Host, keepassPwdMap map[string]string, globalConf *config.Config) ssh.AuthMethod {
+	pwd := getPassword(user, config, keepassPwdMap, globalConf)
 	return ssh.Password(pwd)
 }
 
@@ -216,7 +216,7 @@ func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFla
 	if passwordFlag != "" {
 		authMethod = ssh.Password(passwordFlag)
 	} else {
-		authMethod = getAuthMethod(user, hostConfig, keepassPwdMap)
+		authMethod = getAuthMethod(user, hostConfig, keepassPwdMap, globalConf)
 	}
 
 	clientConfig := &ssh.ClientConfig{
@@ -229,17 +229,17 @@ func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFla
 	return clientConfig, newctx
 }
 
-func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string) (SshClient, context.Context) {
+func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string, globalConf *config.Config) (SshClient, context.Context) {
 	var jumpClient *SshClient = nil
 	if hostConfig.GetJump() != nil {
 		jumpHost := *hostConfig.GetJump()
-		jumpClients, nctx := NewSshClient(ctx, jumpHost, "", keepassPwdMap)
+		jumpClients, nctx := NewSshClient(ctx, jumpHost, "", keepassPwdMap, globalConf)
 		jumpClient = &jumpClients
 		ctx = nctx
 	}
 	if hostConfig.GetHost() == nil {
 		login, ctx := getUser(ctx, hostConfig)
-		password := getPassword(login, hostConfig, keepassPwdMap)
+		password := getPassword(login, hostConfig, keepassPwdMap, globalConf)
 		return SshClient{
 			Client: nil,
 			Jump:   jumpClient,
@@ -263,7 +263,7 @@ func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag stri
 		if err != nil {
 			panic(err)
 		}
-		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap)
+		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap, globalConf)
 		ncc, chans, reqs, err := ssh.NewClientConn(conn, *hostConfig.GetHost(), clientConfig)
 		if err != nil {
 			panic(err)
@@ -275,7 +275,7 @@ func NewSshClient(ctx context.Context, hostConfig config.Host, passwordFlag stri
 			Jump:       jumpClient,
 		}, ctx
 	} else {
-		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap)
+		clientConfig, ctx := newSshClientConfig(ctx, hostConfig, passwordFlag, keepassPwdMap, globalConf)
 		// Connect to ssh server
 		conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", *hostConfig.GetHost(), hostConfig.GetPortOrDefault(22)), clientConfig)
 		if err != nil {
@@ -333,7 +333,11 @@ type Options struct {
 func getSshClient(hostConf config.Host, passwordFlag, keepassPwdFlag string) *ssh.Client {
 	keepassPwdMap := InitKeepassPwdMap(hostConf, keepassPwdFlag)
 	ctx := InitContext()
-	sshClient, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap)
+	globalConf, err := config.ReadConf()
+	if err != nil {
+		log.Panicln("Erreur lors de la lecture de la configuration :", err)
+	}
+	sshClient, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap, globalConf)
 	if sshClient.Client == nil {
 		log.Panicln("Cannot change user of proxied connection")
 	}

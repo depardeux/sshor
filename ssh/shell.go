@@ -32,10 +32,14 @@ func (p PatternDetector) exportBytes() []byte {
 
 func Shell(hostConf config.Host, passwordFlag, keepassPwdFlag string) {
 	keepassPwdMap := InitKeepassPwdMap(hostConf, keepassPwdFlag)
-
 	ctx := InitContext()
 
-	conn, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap)
+	globalConf, err := config.ReadConf()
+	if err != nil {
+		panic(err)
+	}
+
+	conn, _ := NewSshClient(ctx, hostConf, passwordFlag, keepassPwdMap, globalConf)
 	defer conn.Close()
 	// Create a session
 	sshClient := GetFirstNonNilSshClient(conn)
