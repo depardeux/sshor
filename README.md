@@ -44,8 +44,8 @@ These files are automatically managed by the application and are used to validat
 🛠️ Salt and Cache Management
 A PowerShell script named manageSaltAndKeys.ps1 is provided to help manage encryption and cache files:
 
-Option 1: Generate a new salt (used for password hashing)
-Option 2: Delete the KeePass password cache file
+- Option 1: Generate a new salt (used for password hashing)
+- Option 2: Delete the KeePass password cache file
 
 # Install
 
