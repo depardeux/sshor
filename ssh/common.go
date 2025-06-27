@@ -2,10 +2,19 @@ package ssh
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"os/user"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/hurlebouc/sshor/config"
 	"golang.org/x/crypto/ssh"
@@ -210,7 +219,7 @@ func getUser(ctx context.Context, hostConfig config.Host) (string, context.Conte
 	return GetCurrentUser(ctx), ctx
 }
 
-func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string) (*ssh.ClientConfig, context.Context) {
+func newSshClientConfig(ctx context.Context, hostConfig config.Host, passwordFlag string, keepassPwdMap map[string]string, globalConf *config.Config) (*ssh.ClientConfig, context.Context) {
 	user, newctx := getUser(ctx, hostConfig)
 	var authMethod ssh.AuthMethod
 	if passwordFlag != "" {

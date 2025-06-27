@@ -19,33 +19,48 @@ To customize the cache duration for the KeePass password, add the following opti
 
 ```cuelang
 package sshor
-
+```
 keepassPwdCacheExpirationMinutes: 360
 
 hosts: {
-    ...
+...
 }
 
-📁 Cache and Salt File Storage
-During the caching process, two files are created to securely store authentication data:
+### 📁 Cache and Salt File Storage
 
-🗂️ KeePass password cache file
-Stores the SHA-256 hash of the KeePass password.
-Location:
-%USERPROFILE%\AppData\Local\Temp\sshor_keepass_*.cache
+During the authentication caching process, two files are created to securely store sensitive data:
 
-🧂 Salt file
-Used to enhance password hashing security.
-Location:
-%APPDATA%\sshor_keepass_salt.txt
+- **🗂️ KeePass Password Cache File**  
+  Contains the SHA-256 hash of the KeePass password.  
+  **Location:**  
+  `%USERPROFILE%\AppData\Local\Temp\sshor_keepass_*.cache`
+
+- **🧂 Salt File**  
+  Used to strengthen password hashing security.  
+  **Location:**  
+  `%APPDATA%\sshor_keepass_salt.txt`
 
 These files are automatically managed by the application and are used to validate the cached password during the defined expiration period.
 
-🛠️ Salt and Cache Management
-A PowerShell script named manageSaltAndKeys.ps1 is provided to help manage encryption and cache files:
+---
 
-Option 1: Generate a new salt (used for password hashing)
-Option 2: Delete the KeePass password cache file
+### 🛠️ Salt and Cache Management
+
+Salt and cache file management is now handled directly via the `sshor manage` command-line interface, replacing the previous PowerShell script.
+
+- **Generate a new salt**
+  ```bash
+  sshor manage salt
+  ```
+
+This command creates a new salt file, used to enhance password hashing.
+
+- **Delete the cached KeePass password file**
+  ```bash
+  sshor manage clean
+  ```
+
+This command removes the cached password file from the system.
 
 # Install
 
